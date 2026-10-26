@@ -1,0 +1,161 @@
+---
+# Prepare kernel networking and inspect host firewalls.
+- name: Prepare Kubernetes node networking
+  hosts: k8s_cluster
+  become: true
+  gather_facts: false
+
+  vars:
+    kernel_modules:
+      - overlay
+      - br_netfilter
+
+    kernel_sysctls:
+      net.ipv4.ip_forward: "1"
+      net.bridge.bridge-nf-call-iptables: "1"
+
+  tasks:
+    - name: Persist required kernel modules
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/kubelab.conf
+        content: |
+          # Load modules required by the lab.
+          overlay
+          br_netfilter
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      register: modules_config
+
+    - name: Load required kernel modules when absent
+      ansible.builtin.command:
+        argv:
+          - modprobe
+          - "{{ item }}"
+        creates: "/sys/module/{{ item }}"
+      loop: "{{ kernel_modules }}"
+
+    - name: Persist IPv4 networking settings
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-kubelab.conf
+        content: |
+          # Enable IPv4 routing and bridge packet processing.
+          net.ipv4.ip_forward = 1
+          net.bridge.bridge-nf-call-iptables = 1
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      register: sysctl_config
+
+    - name: Read current kernel networking settings
+      ansible.builtin.command:
+        argv:
+          - sysctl
+          - -n
+          - "{{ item.key }}"
+      loop: "{{ kernel_sysctls | dict2items }}"
+      register: sysctl_before
+      changed_when: false
+
+    - name: Apply kernel networking settings when needed
+      ansible.builtin.command:
+        argv:
+          - sysctl
+          - --load
+          - /etc/sysctl.d/99-kubelab.conf
+      when: >-
+        sysctl_config.changed or
+        (sysctl_before.results |
+         selectattr('stdout', 'ne', '1') |
+         list | length > 0)
+
+    - name: Reboot after persistent configuration changes
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when: modules_config.changed or sysctl_config.changed
+
+    - name: Check required modules after configuration
+      ansible.builtin.stat:
+        path: "/sys/module/{{ item }}"
+      loop: "{{ kernel_modules }}"
+      register: modules_after
+
+    - name: Verify required modules are loaded
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+        fail_msg: "Required kernel module is missing: {{ item.item }}"
+      loop: "{{ modules_after.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Read effective kernel networking settings
+      ansible.builtin.command:
+        argv:
+          - sysctl
+          - -n
+          - "{{ item.key }}"
+      loop: "{{ kernel_sysctls | dict2items }}"
+      register: sysctl_after
+      changed_when: false
+
+    - name: Verify effective kernel networking settings
+      ansible.builtin.assert:
+        that:
+          - (item.stdout | trim) == item.item.value
+        fail_msg: "Unexpected kernel setting: {{ item.item.key }}"
+      loop: "{{ sysctl_after.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"
+
+    - name: Verify TCP connectivity to the other nodes
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[item]['ansible_host'] }}"
+        port: 22
+        state: started
+        connect_timeout: 3
+        timeout: 15
+      loop: "{{ groups['k8s_cluster'] | difference([inventory_hostname]) }}"
+
+    - name: Read existing host firewall configuration
+      ansible.builtin.shell: |
+        set -eu
+
+        if command -v ufw >/dev/null 2>&1; then
+          ufw status verbose
+        else
+          printf '%s\n' 'ufw: not installed'
+        fi
+
+        for tool in iptables-save ip6tables-save; do
+          printf '\n%s\n' "$tool"
+          if command -v "$tool" >/dev/null 2>&1; then
+            "$tool"
+          else
+            printf '%s\n' 'not installed'
+          fi
+        done
+
+        printf '\n%s\n' 'nft ruleset'
+        if command -v nft >/dev/null 2>&1; then
+          nft list ruleset
+        else
+          printf '%s\n' 'nft: not installed'
+        fi
+      environment:
+        LC_ALL: C
+      register: firewall_audit
+      changed_when: false
+
+    - name: Show effective kernel networking settings
+      ansible.builtin.debug:
+        msg: "{{ item.item.key }}={{ item.stdout | trim }}"
+      loop: "{{ sysctl_after.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"
+
+    - name: Show the host firewall audit
+      ansible.builtin.debug:
+        var: firewall_audit.stdout_lines

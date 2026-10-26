@@ -1,0 +1,125 @@
+---
+# Prepare Ubuntu node identity, name resolution, time, and swap.
+- name: Prepare the Ubuntu node baseline
+  hosts: k8s_cluster
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Validate the operating system and node hostname
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['distribution_version'] == '24.04'
+          - ansible_facts['hostname'] == inventory_hostname
+        fail_msg: Unexpected operating system or hostname for this inventory.
+
+    - name: Preserve locally managed node identity
+      ansible.builtin.copy:
+        dest: /etc/cloud/cloud.cfg.d/99-kubelab-identity.cfg
+        content: |
+          # Preserve locally managed hostnames and host mappings.
+          preserve_hostname: true
+          manage_etc_hosts: false
+        owner: root
+        group: root
+        mode: "0644"
+      register: identity_config
+
+    - name: Comment the node's original loopback hostname association
+      ansible.builtin.replace:
+        path: /etc/hosts
+        regexp: '^([ \t]*)(127\.0\.1\.1[ \t]+(?:[^# \t\n]+[ \t]+)*{{ inventory_hostname | regex_escape }}(?:[ \t]+[^\n]*)?)$'
+        replace: '\1# \2'
+        backup: true
+      register: loopback_alias
+
+    - name: Manage static hostname mappings for the lab nodes
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} KUBELAB HOSTS"
+        block: |
+          192.168.219.10 k8s-control-plane
+          192.168.219.11 k8s-worker-01
+          192.168.219.12 k8s-worker-02
+        backup: true
+      register: node_hosts
+
+    - name: Enable and start Ubuntu time synchronization
+      ansible.builtin.systemd_service:
+        name: systemd-timesyncd
+        enabled: true
+        state: started
+
+    - name: Comment active swap entries in the filesystem table
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([ \t]*)([^#\s]\S*[ \t]+\S+[ \t]+swap(?:[ \t]+.*)?)$'
+        replace: '\1# \2'
+        backup: true
+      register: swap_config
+
+    - name: Read currently active swap
+      ansible.builtin.command: swapon --show --noheadings
+      register: swap_before
+      changed_when: false
+
+    - name: Disable currently active swap
+      ansible.builtin.command: swapoff --all
+      when: (swap_before.stdout | trim | length) > 0
+      register: swap_disabled
+
+    - name: Reboot after persistent node configuration changes
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when: >-
+        identity_config.changed or
+        loopback_alias.changed or
+        node_hosts.changed or
+        swap_config.changed or
+        (swap_disabled.changed | default(false))
+
+    - name: Read the hostname after configuration
+      ansible.builtin.command: hostname
+      register: node_hostname
+      changed_when: false
+
+    - name: Read active swap after configuration
+      ansible.builtin.command: swapon --show --noheadings
+      register: swap_after
+      changed_when: false
+
+    - name: Verify hostname persistence and disabled swap
+      ansible.builtin.assert:
+        that:
+          - (node_hostname.stdout | trim) == inventory_hostname
+          - (swap_after.stdout | trim | length) == 0
+        fail_msg: Hostname or swap verification failed after node preparation.
+
+    - name: Wait for the system clock to synchronize
+      ansible.builtin.command: timedatectl show --property=NTPSynchronized --value
+      register: time_sync
+      changed_when: false
+      until: (time_sync.stdout | trim) == 'yes'
+      retries: 24
+      delay: 5
+
+    - name: Verify each node name resolves to its inventory address
+      ansible.builtin.command: "getent ahostsv4 {{ item }}"
+      loop: "{{ groups['k8s_cluster'] }}"
+      register: node_resolution
+      changed_when: false
+      failed_when: >-
+        node_resolution.rc != 0 or
+        (node_resolution.stdout.split() | first | default(''))
+        != hostvars[item]['ansible_host']
+
+    - name: Show the prepared node state
+      ansible.builtin.debug:
+        msg:
+          hostname: "{{ node_hostname.stdout | trim }}"
+          address: "{{ ansible_host }}"
+          product_uuid: "{{ ansible_facts['product_uuid'] | default('unavailable') }}"
+          mac_address: "{{ ansible_facts.get('ens33', {}).get('macaddress', 'unavailable') }}"
+          clock_synchronized: "{{ time_sync.stdout | trim }}"
+          swap_active: "{{ (swap_after.stdout | trim | length) > 0 }}"

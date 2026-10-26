@@ -1,0 +1,156 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubelab-frontend
+  namespace: kubelab
+  labels:
+    app.kubernetes.io/name: kubelab-frontend
+    app.kubernetes.io/part-of: kubelab
+spec:
+  type: NodePort
+  externalTrafficPolicy: Cluster
+  selector:
+    app.kubernetes.io/name: kubelab-frontend
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: http
+      nodePort: 30080
+    - name: https
+      protocol: TCP
+      port: 8443
+      targetPort: https
+      nodePort: 30443
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubelab-frontend
+  namespace: kubelab
+  labels:
+    app.kubernetes.io/name: kubelab-frontend
+    app.kubernetes.io/part-of: kubelab
+spec:
+  replicas: 2
+  minReadySeconds: 5
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubelab-frontend
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubelab-frontend
+        app.kubernetes.io/part-of: kubelab
+
+    spec:
+      serviceAccountName: kubelab-frontend
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+
+      nodeSelector:
+        kubelab.io/workloads: enabled
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          nodeAffinityPolicy: Honor
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: kubelab-frontend
+          matchLabelKeys:
+            - pod-template-hash
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: frontend
+          image: localhost/kubelab-frontend:1.0.0
+          imagePullPolicy: Never
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "250m"
+              memory: "64Mi"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: frontend-tls
+              mountPath: /run/kubelab/tls
+              readOnly: true
+            - name: application-ca
+              mountPath: /run/kubelab/ca
+              readOnly: true
+            - name: temporary-files
+              mountPath: /tmp
+
+      volumes:
+        - name: temporary-files
+          emptyDir:
+            sizeLimit: "64Mi"
+        - name: frontend-tls
+          secret:
+            secretName: kubelab-frontend-tls
+            defaultMode: 0440
+        - name: application-ca
+          configMap:
+            name: kubelab-application-ca
+            defaultMode: 0444

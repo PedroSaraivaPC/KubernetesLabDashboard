@@ -1,0 +1,138 @@
+---
+# Initialize the control plane and install Flannel.
+- name: Bootstrap the Kubernetes control plane
+  hosts: control_plane
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Install standard CNI plugins
+      ansible.builtin.apt:
+        name: kubernetes-cni
+        state: present
+        lock_timeout: 120
+
+    - name: Inspect required CNI binaries
+      ansible.builtin.stat:
+        path: "/opt/cni/bin/{{ item }}"
+      loop:
+        - bridge
+        - host-local
+        - loopback
+        - portmap
+      register: cni_binaries
+
+    - name: Verify required CNI binaries
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.executable | default(false)
+        fail_msg: "Missing executable CNI plugin: {{ item.item }}"
+      loop: "{{ cni_binaries.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Inspect the administrator configuration
+      ansible.builtin.stat:
+        path: /etc/kubernetes/admin.conf
+      register: admin_config
+
+    - name: Inspect the initialization completion marker
+      ansible.builtin.stat:
+        path: /root/.kubelab-control-plane-initialized
+      register: init_marker
+
+    - name: Reject incomplete initialization state
+      ansible.builtin.assert:
+        that:
+          - admin_config.stat.exists == init_marker.stat.exists
+        fail_msg: >-
+          Incomplete or inconsistent initialization state detected.
+          Inspect the previous initialization before continuing.
+
+    - name: Deploy and validate the initialization configuration
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/kubeadm/init.yaml"
+        dest: /root/kubeadm-init.yaml
+        owner: root
+        group: root
+        mode: "0600"
+        validate: /usr/bin/kubeadm config validate --config %s
+
+    - name: Initialize the Kubernetes control plane
+      ansible.builtin.command:
+        argv:
+          - kubeadm
+          - init
+          - --config=/root/kubeadm-init.yaml
+          - --skip-token-print
+      when: not init_marker.stat.exists
+
+    - name: Wait for the Kubernetes API to become ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - --request-timeout=10s
+          - get
+          - --raw=/readyz
+      register: api_ready
+      changed_when: false
+      until: >-
+        api_ready.rc == 0 and
+        (api_ready.stdout | trim) == 'ok'
+      retries: 30
+      delay: 5
+
+    - name: Record successful control-plane initialization
+      ansible.builtin.copy:
+        dest: /root/.kubelab-control-plane-initialized
+        content: |
+          Control-plane initialization completed.
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Create the administrator kubeconfig directory
+      ansible.builtin.file:
+        path: /home/pedro/.kube
+        state: directory
+        owner: pedro
+        group: pedro
+        mode: "0700"
+
+    - name: Install the private administrator kubeconfig
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/pedro/.kube/config
+        remote_src: true
+        owner: pedro
+        group: pedro
+        mode: "0600"
+      no_log: true
+      diff: false
+
+    - name: Deploy the pinned Flannel manifest
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/flannel/kube-flannel-v0.28.10.yml"
+        dest: /root/kube-flannel-v0.28.10.yml
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply Flannel networking
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - apply
+          - -f
+          - /root/kube-flannel-v0.28.10.yml
+      register: flannel_apply
+      changed_when: >-
+        ' created' in flannel_apply.stdout or
+        ' configured' in flannel_apply.stdout
+
+    - name: Show Flannel application results
+      ansible.builtin.debug:
+        var: flannel_apply.stdout_lines

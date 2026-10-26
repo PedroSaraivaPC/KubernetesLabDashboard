@@ -1,0 +1,24 @@
+# Configure containerd for Kubernetes.
+version = 3
+
+disabled_plugins = []
+required_plugins = [
+  "io.containerd.cri.v1.images",
+  "io.containerd.cri.v1.runtime",
+  "io.containerd.grpc.v1.cri",
+]
+
+[plugins."io.containerd.cri.v1.images"]
+  snapshotter = "overlayfs"
+
+[plugins."io.containerd.cri.v1.images".pinned_images]
+  sandbox = "registry.k8s.io/pause:3.10.2"
+
+[plugins."io.containerd.cri.v1.runtime".containerd]
+  default_runtime_name = "runc"
+
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc.options]
+  SystemdCgroup = true

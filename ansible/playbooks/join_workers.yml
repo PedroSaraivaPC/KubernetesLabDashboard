@@ -1,0 +1,101 @@
+---
+# Join worker nodes using a privately supplied bootstrap command.
+- name: Join Kubernetes worker nodes
+  hosts: workers
+  become: true
+  gather_facts: false
+
+  vars_prompt:
+    - name: worker_join_command
+      prompt: Paste the complete kubeadm join command
+      private: true
+
+  tasks:
+    - name: Inspect the worker kubelet configuration
+      ansible.builtin.stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_config
+
+    - name: Inspect the worker completion marker
+      ansible.builtin.stat:
+        path: /root/.kubelab-worker-joined
+      register: join_marker
+
+    - name: Reject incomplete worker join state
+      ansible.builtin.assert:
+        that:
+          - kubelet_config.stat.exists == join_marker.stat.exists
+        fail_msg: >-
+          Incomplete or inconsistent worker join state detected.
+          Inspect the previous join before continuing.
+
+    - name: Verify connectivity to the Kubernetes API
+      ansible.builtin.wait_for:
+        host: 192.168.219.10
+        port: 6443
+        connect_timeout: 3
+        timeout: 30
+
+    - name: Install standard CNI plugins
+      ansible.builtin.apt:
+        name: kubernetes-cni
+        state: present
+        lock_timeout: 120
+
+    - name: Inspect required CNI binaries
+      ansible.builtin.stat:
+        path: "/opt/cni/bin/{{ item }}"
+      loop:
+        - bridge
+        - host-local
+        - loopback
+        - portmap
+      register: cni_binaries
+
+    - name: Verify required CNI binaries
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.executable | default(false)
+        fail_msg: "Missing executable CNI plugin: {{ item.item }}"
+      loop: "{{ cni_binaries.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Validate the supplied worker join command
+      ansible.builtin.assert:
+        that:
+          - >-
+            worker_join_command.split()[:3] ==
+            ['kubeadm', 'join', '192.168.219.10:6443']
+          - "'--token' in worker_join_command.split()"
+          - "'--discovery-token-ca-cert-hash' in worker_join_command.split()"
+          - "'--control-plane' not in worker_join_command.split()"
+      when: not join_marker.stat.exists
+      no_log: true
+
+    - name: Join the worker to the cluster
+      ansible.builtin.command:
+        argv: >-
+          {{ worker_join_command.split() +
+             ['--cri-socket=unix:///run/containerd/containerd.sock',
+              '--node-name=' + inventory_hostname] }}
+      when: not join_marker.stat.exists
+      no_log: true
+
+    - name: Verify that kubelet is active
+      ansible.builtin.command: systemctl is-active kubelet
+      register: kubelet_state
+      changed_when: false
+      until: kubelet_state.rc == 0
+      retries: 15
+      delay: 2
+
+    - name: Record successful worker bootstrap
+      ansible.builtin.copy:
+        dest: /root/.kubelab-worker-joined
+        content: |
+          Worker bootstrap completed.
+        owner: root
+        group: root
+        mode: "0600"

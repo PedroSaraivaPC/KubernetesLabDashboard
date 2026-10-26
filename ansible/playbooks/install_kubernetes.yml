@@ -1,0 +1,189 @@
+---
+# Install Kubernetes packages and verify the CRI runtime.
+- name: Install Kubernetes node packages
+  hosts: k8s_cluster
+  become: true
+  gather_facts: false
+
+  vars:
+    kubernetes_version: "1.36.5"
+
+  tasks:
+    - name: Ensure HTTPS certificate support is installed
+      ansible.builtin.apt:
+        name: ca-certificates
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 120
+
+    - name: Ensure the APT keyring directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download the Kubernetes repository signing key
+      ansible.builtin.get_url:
+        url: https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key
+        dest: /etc/apt/keyrings/kubernetes.asc
+        owner: root
+        group: root
+        mode: "0644"
+        force: true
+
+    - name: Configure the Kubernetes 1.36 repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/kubernetes.asc] https://pkgs.k8s.io/core:/stable:/v1.36/deb/ /
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install matching Kubernetes packages and CRI tools
+      ansible.builtin.apt:
+        name:
+          - "kubeadm={{ kubernetes_version }}-*"
+          - "kubelet={{ kubernetes_version }}-*"
+          - "kubectl={{ kubernetes_version }}-*"
+          - cri-tools
+        state: present
+        update_cache: true
+        lock_timeout: 120
+
+    - name: Hold Kubernetes package versions
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubeadm
+        - kubelet
+        - kubectl
+
+    - name: Deploy the aligned containerd configuration
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/containerd/config.toml"
+        dest: /etc/containerd/config.toml
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+        validate: /usr/bin/containerd --config %s config dump
+      notify: Restart containerd
+
+    - name: Apply runtime configuration before CRI verification
+      ansible.builtin.meta: flush_handlers
+
+    - name: Configure the CRI inspection endpoint
+      ansible.builtin.copy:
+        dest: /etc/crictl.yaml
+        content: |
+          runtime-endpoint: unix:///run/containerd/containerd.sock
+          image-endpoint: unix:///run/containerd/containerd.sock
+          timeout: 10
+          debug: false
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Enable kubelet startup
+      ansible.builtin.systemd_service:
+        name: kubelet
+        enabled: true
+
+    - name: Gather installed package versions
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Verify matching Kubernetes package versions
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_facts['packages'][item][0]['version'].split('-')[0]
+            == kubernetes_version
+        fail_msg: "Unexpected installed version for {{ item }}."
+      loop:
+        - kubeadm
+        - kubelet
+        - kubectl
+
+    - name: Read held package names
+      ansible.builtin.command: apt-mark showhold
+      register: package_holds
+      changed_when: false
+
+    - name: Verify Kubernetes package holds
+      ansible.builtin.assert:
+        that:
+          - item in package_holds.stdout_lines
+      loop:
+        - kubeadm
+        - kubelet
+        - kubectl
+
+    - name: Read CRI client and runtime version information
+      ansible.builtin.command: crictl version
+      register: cri_version
+      changed_when: false
+
+    - name: Read live CRI runtime information
+      ansible.builtin.command: crictl info
+      register: cri_info
+      changed_when: false
+
+    - name: Parse live CRI runtime information
+      ansible.builtin.set_fact:
+        cri_status: "{{ cri_info.stdout | from_json }}"
+
+    - name: Verify runtime readiness and systemd cgroups
+      ansible.builtin.assert:
+        that:
+          - >-
+            (cri_status.status.conditions |
+             selectattr('type', 'equalto', 'RuntimeReady') |
+             map(attribute='status') | list) == [true]
+          - cri_status.config.containerd.defaultRuntimeName == 'runc'
+          - >-
+            cri_status.config.containerd.runtimes.runc.options.SystemdCgroup
+            == true
+        fail_msg: The CRI runtime is not ready or has unexpected settings.
+
+    - name: Check whether the sandbox image is already present
+      ansible.builtin.command:
+        argv:
+          - crictl
+          - inspecti
+          - registry.k8s.io/pause:3.10.2
+      register: sandbox_image
+      changed_when: false
+      failed_when: false
+
+    - name: Pull the sandbox image when absent
+      ansible.builtin.command:
+        argv:
+          - crictl
+          - pull
+          - registry.k8s.io/pause:3.10.2
+      when: sandbox_image.rc != 0
+
+    - name: Show Kubernetes package and CRI verification results
+      ansible.builtin.debug:
+        msg:
+          kubeadm: "{{ ansible_facts['packages']['kubeadm'][0]['version'] }}"
+          kubelet: "{{ ansible_facts['packages']['kubelet'][0]['version'] }}"
+          kubectl: "{{ ansible_facts['packages']['kubectl'][0]['version'] }}"
+          cri_tools: "{{ ansible_facts['packages']['cri-tools'][0]['version'] }}"
+          held_packages: "{{ package_holds.stdout_lines }}"
+          cri_version: "{{ cri_version.stdout_lines }}"
+          runtime_conditions: "{{ cri_status.status.conditions }}"
+          systemd_cgroup: >-
+            {{ cri_status.config.containerd.runtimes.runc.options.SystemdCgroup }}
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: restarted

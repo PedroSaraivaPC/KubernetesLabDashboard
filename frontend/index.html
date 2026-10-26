@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KubeLab Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/actions.js" defer></script>
+  <script src="/details.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+
+<body>
+  <main>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">KUBERNETES LAB</p>
+        <h1>KubeLab Dashboard</h1>
+        <p class="muted">Nodes, workloads, and container observations.</p>
+      </div>
+      <a href="/api/nodes" target="_blank" rel="noopener">
+        View Node JSON
+      </a>
+    </header>
+
+    <section class="toolbar" aria-label="Dashboard controls">
+      <div class="controls">
+        <label for="namespace">
+          Workload namespace
+          <select id="namespace">
+            <option value="">All namespaces</option>
+            <option value="kubelab">kubelab</option>
+            <option value="kube-system">kube-system</option>
+            <option value="kube-flannel">kube-flannel</option>
+            <option value="default">default</option>
+          </select>
+        </label>
+        <button id="refresh" type="button">Refresh now</button>
+      </div>
+
+      <p class="muted">
+        Last successful refresh:
+        <time id="updated">Not yet</time>
+      </p>
+    </section>
+
+    <p id="status" class="status" role="status" data-state="neutral">
+      Waiting for data.
+    </p>
+
+    <section class="actions-panel" aria-labelledby="actions-title">
+      <h2 id="actions-title">Workload actions</h2>
+      <p class="muted">
+        Manage KubeLab workloads in the kubelab namespace. Select All namespaces
+        or kubelab above to load targets. Open an action to review its options.
+      </p>
+
+      <div class="actions-grid">
+        <article class="action-card">
+          <h3>Scale a Deployment</h3>
+          <p class="muted">
+            Change how many Pod replicas a Deployment keeps running.
+            Kubernetes creates or removes Pods to reach your desired count.
+          </p>
+          <button id="open-scale-action" type="button">
+            Open scaling
+          </button>
+        </article>
+
+        <article class="action-card">
+          <h3>Replace a Pod</h3>
+          <p class="muted">
+            Delete one Pod owned by a KubeLab Deployment. Its ReplicaSet
+            creates a replacement to maintain the desired replica count.
+          </p>
+          <button id="open-pod-action" type="button">
+            Open Pod replacement
+          </button>
+        </article>
+      </div>
+
+    </section>
+
+    <section class="summary" aria-label="Resource counts">
+      <article class="metric">
+        <p>Ready Nodes / total</p>
+        <strong id="node-count">—</strong>
+      </article>
+      <article class="metric">
+        <p>Ready Pods / total</p>
+        <strong id="pod-count">—</strong>
+      </article>
+      <article class="metric">
+        <p>Deployments</p>
+        <strong id="deployment-count">—</strong>
+      </article>
+      <article class="metric">
+        <p>Regular containers</p>
+        <strong id="container-count">—</strong>
+      </article>
+    </section>
+
+    <p class="muted">
+      Workload counts follow the namespace filter.
+      Nodes always show the whole cluster.
+    </p>
+
+    <section aria-labelledby="nodes-title">
+      <h2 id="nodes-title">Nodes</h2>
+      <div id="nodes" class="node-grid"></div>
+    </section>
+
+    <section aria-labelledby="deployments-title">
+      <h2 id="deployments-title">Deployments</h2>
+      <div class="table-wrap">
+        <table aria-labelledby="deployments-title">
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Namespace</th>
+              <th scope="col">Desired</th>
+              <th scope="col">Ready</th>
+              <th scope="col">Available</th>
+              <th scope="col">Updated</th>
+              <th scope="col">Images</th>
+            </tr>
+          </thead>
+          <tbody id="deployments"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="pods-title">
+      <h2 id="pods-title" tabindex="-1">Pods</h2>
+      <div class="table-wrap">
+        <table aria-labelledby="pods-title">
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Namespace</th>
+              <th scope="col">Node</th>
+              <th scope="col">Pod IP</th>
+              <th scope="col">Phase</th>
+              <th scope="col">Ready</th>
+              <th scope="col">Controller owner</th>
+            </tr>
+          </thead>
+          <tbody id="pods"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="containers-title">
+      <h2 id="containers-title">Containers</h2>
+      <p class="muted">
+        Flannel's completed init containers with exit code 0 are expected.
+        Hover over an image to inspect its reported runtime image ID.
+      </p>
+      <div class="table-wrap">
+        <table aria-labelledby="containers-title">
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Pod</th>
+              <th scope="col">Namespace</th>
+              <th scope="col">Kind</th>
+              <th scope="col">State / reason</th>
+              <th scope="col">Ready</th>
+              <th scope="col">Restarts</th>
+              <th scope="col">Image</th>
+            </tr>
+          </thead>
+          <tbody id="containers"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="scale-action-dialog" class="resource-details action-dialog"
+          aria-labelledby="scale-action-title"
+          aria-describedby="scale-action-description">
+    <div class="details-header">
+      <h2 id="scale-action-title" tabindex="-1">Scale a Deployment</h2>
+      <button id="close-scale-action" class="details-close" type="button"
+              aria-label="Close scaling">×</button>
+    </div>
+    <p id="scale-action-description" class="muted">
+      A Deployment manages a desired number of Pod replicas through its
+      ReplicaSet. Choose a KubeLab Deployment and a count from 1 to 6.
+      Scaling up creates Pods; scaling down removes Pods.
+    </p>
+    <form id="scale-form">
+      <label for="action-deployment">
+        Deployment
+        <select id="action-deployment" required disabled>
+          <option value="">Choose a target</option>
+        </select>
+      </label>
+
+      <label for="action-replicas">
+        Desired replicas
+        <input id="action-replicas" type="number"
+               min="1" max="6" step="1" required disabled>
+      </label>
+
+      <button id="action-scale" type="submit" disabled>
+        Scale Deployment
+      </button>
+    </form>
+  </dialog>
+
+  <dialog id="pod-action-dialog" class="resource-details action-dialog"
+          aria-labelledby="pod-action-title"
+          aria-describedby="pod-action-description">
+    <div class="details-header">
+      <h2 id="pod-action-title" tabindex="-1">Replace a Pod</h2>
+      <button id="close-pod-action" class="details-close" type="button"
+              aria-label="Close Pod replacement">×</button>
+    </div>
+    <p id="pod-action-description" class="muted">
+      Delete one Pod belonging to a KubeLab Deployment. Its ReplicaSet creates
+      a new Pod to maintain the desired replica count. The new Pod has a new
+      UID and may run on a different worker. This does not change the desired count.
+    </p>
+    <form id="pod-form">
+      <label for="action-pod">
+        Pod replacement candidate
+        <select id="action-pod" required disabled>
+          <option value="">Choose a target</option>
+        </select>
+      </label>
+
+      <p class="muted">
+        The backend verifies that the Pod belongs to an allowed Deployment.
+        Its controller creates the replacement after deletion.
+      </p>
+
+      <button id="action-replace" class="danger" type="submit" disabled>
+        Replace Pod
+      </button>
+    </form>
+  </dialog>
+</body>
+</html>

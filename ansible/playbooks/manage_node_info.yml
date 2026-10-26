@@ -1,0 +1,17 @@
+---
+# Manage lab identification on the Kubernetes VMs.
+- name: Manage Kubernetes lab identification
+  hosts: k8s_cluster
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Ensure the lab identification file has the required state
+      ansible.builtin.copy:
+        dest: /etc/kubelab-node-info
+        content: |
+          Lab: Kubernetes Lab Dashboard
+          Managed by: Ansible
+        owner: root
+        group: root
+        mode: "0644"

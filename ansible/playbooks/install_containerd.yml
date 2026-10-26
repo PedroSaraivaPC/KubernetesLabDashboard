@@ -1,0 +1,183 @@
+---
+# Install and configure Ubuntu's containerd runtime.
+- name: Install and verify containerd
+  hosts: k8s_cluster
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Verify the expected operating system and architecture
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['distribution_version'] == '24.04'
+          - ansible_facts['architecture'] == 'x86_64'
+        fail_msg: This playbook expects Ubuntu 24.04 on AMD64.
+
+    - name: Read the cgroup filesystem type
+      ansible.builtin.command: stat -fc %T /sys/fs/cgroup
+      register: cgroup_filesystem
+      changed_when: false
+
+    - name: Verify that cgroup v2 is available
+      ansible.builtin.assert:
+        that:
+          - (cgroup_filesystem.stdout | trim) == 'cgroup2fs'
+        fail_msg: The lab expects the cgroup v2 hierarchy.
+
+    - name: Install Ubuntu container runtime packages
+      ansible.builtin.apt:
+        name:
+          - containerd
+          - runc
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 120
+      notify: Restart containerd
+
+    - name: Read the installed containerd version
+      ansible.builtin.command: containerd --version
+      register: containerd_version
+      changed_when: false
+
+    - name: Extract the containerd release version
+      ansible.builtin.set_fact:
+        containerd_release: >-
+          {{ containerd_version.stdout |
+             regex_search('[0-9]+\.[0-9]+\.[0-9]+') }}
+
+    - name: Verify the supported containerd version range
+      ansible.builtin.assert:
+        that:
+          - containerd_release is version('2.2.0', '>=')
+          - containerd_release is version('3.0.0', '<')
+        fail_msg: >-
+          Expected containerd 2.2 or newer within the 2.x series.
+          Installed output: {{ containerd_version.stdout }}
+
+    - name: Ensure the containerd configuration directory exists
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Deploy the Kubernetes containerd configuration
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/containerd/config.toml"
+        dest: /etc/containerd/config.toml
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+        validate: /usr/bin/containerd --config %s config dump
+      notify: Restart containerd
+
+    - name: Enable and start containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        enabled: true
+        state: started
+
+    - name: Apply pending runtime changes before verification
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify the configuration loaded from disk
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - |
+            import json
+            import subprocess
+            import tomllib
+
+            result = subprocess.run(
+                ["/usr/bin/containerd", "config", "dump"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            config = tomllib.loads(result.stdout)
+            plugins = config["plugins"]
+            runtime = plugins[
+                "io.containerd.cri.v1.runtime"
+            ]["containerd"]
+            runc = runtime["runtimes"]["runc"]
+            required = {
+                "io.containerd.cri.v1.images",
+                "io.containerd.cri.v1.runtime",
+                "io.containerd.grpc.v1.cri",
+            }
+
+            assert config["version"] == 3
+            assert config["disabled_plugins"] == []
+            assert required.issubset(config["required_plugins"])
+            assert runtime["default_runtime_name"] == "runc"
+            assert runc["runtime_type"] == "io.containerd.runc.v2"
+            assert runc["options"]["SystemdCgroup"] is True
+            assert plugins[
+                "io.containerd.cri.v1.images"
+            ]["snapshotter"] == "overlayfs"
+
+            print(json.dumps({
+                "config_version": config["version"],
+                "snapshotter": "overlayfs",
+                "default_runtime": runtime["default_runtime_name"],
+                "systemd_cgroup": runc["options"]["SystemdCgroup"],
+            }))
+      register: runtime_config
+      changed_when: false
+
+    - name: Verify that containerd is active
+      ansible.builtin.command: systemctl is-active containerd
+      register: runtime_state
+      changed_when: false
+
+    - name: Verify access to the running containerd daemon
+      ansible.builtin.command:
+        argv:
+          - ctr
+          - --address
+          - /run/containerd/containerd.sock
+          - version
+      register: daemon_version
+      changed_when: false
+
+    - name: Read the running containerd plugin states
+      ansible.builtin.command:
+        argv:
+          - ctr
+          - --address
+          - /run/containerd/containerd.sock
+          - plugins
+          - ls
+      register: runtime_plugins
+      changed_when: false
+
+    - name: Gather installed package versions
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Show the runtime verification results
+      ansible.builtin.debug:
+        msg:
+          containerd_package: >-
+            {{ ansible_facts['packages']['containerd'][0]['version'] }}
+          runc_package: >-
+            {{ ansible_facts['packages']['runc'][0]['version'] }}
+          service: "{{ runtime_state.stdout | trim }}"
+          configuration: "{{ runtime_config.stdout | from_json }}"
+          client_and_server: "{{ daemon_version.stdout_lines }}"
+
+    - name: Show the running containerd plugins
+      ansible.builtin.debug:
+        var: runtime_plugins.stdout_lines
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: restarted

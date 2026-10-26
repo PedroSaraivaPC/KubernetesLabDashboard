@@ -1,0 +1,132 @@
+---
+- name: Distribute KubeLab images to worker runtimes
+  hosts: workers
+  gather_facts: false
+  become: true
+
+  vars:
+    kubelab_image_cache: >-
+      {{ lookup('ansible.builtin.env', 'HOME') }}/.cache/kubelab/images
+
+    kubelab_import_directory: /var/tmp/kubelab-images
+    kubelab_expected_image_ids: {}
+
+    kubelab_images:
+      - archive: kubelab-backend-1.0.0.tar
+        reference: localhost/kubelab-backend:1.0.0
+
+      - archive: kubelab-frontend-1.0.0.tar
+        reference: localhost/kubelab-frontend:1.0.0
+
+  pre_tasks:
+    - name: Require the newly built configuration IDs
+      ansible.builtin.assert:
+        that:
+          - kubelab_expected_image_ids is mapping
+          - kubelab_expected_image_ids.get(item.reference, '') is match('^sha256:[0-9a-f]{64}$')
+        fail_msg: Generate IMAGE_IDS.json and pass it with --extra-vars before importing images.
+      loop: "{{ kubelab_images }}"
+      loop_control:
+        label: "{{ item.reference }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Verify source archives on the Ansible controller
+      ansible.builtin.command:
+        argv:
+          - sha256sum
+          - --check
+          - SHA256SUMS
+        chdir: "{{ kubelab_image_cache }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      changed_when: false
+
+  tasks:
+    - name: Create the image transfer directory
+      ansible.builtin.file:
+        path: "{{ kubelab_import_directory }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Copy application image archives
+      ansible.builtin.copy:
+        src: "{{ kubelab_image_cache }}/{{ item.archive }}"
+        dest: "{{ kubelab_import_directory }}/{{ item.archive }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ kubelab_images }}"
+      loop_control:
+        label: "{{ item.archive }}"
+
+    - name: Copy archive checksums
+      ansible.builtin.copy:
+        src: "{{ kubelab_image_cache }}/SHA256SUMS"
+        dest: "{{ kubelab_import_directory }}/SHA256SUMS"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Verify transferred archives
+      ansible.builtin.command:
+        argv:
+          - sha256sum
+          - --check
+          - SHA256SUMS
+        chdir: "{{ kubelab_import_directory }}"
+      register: kubelab_checksum_check
+      changed_when: false
+
+    - name: Display archive verification
+      ansible.builtin.debug:
+        var: kubelab_checksum_check.stdout_lines
+
+    - name: Import application images into containerd
+      ansible.builtin.command:
+        argv:
+          - ctr
+          - --namespace
+          - k8s.io
+          - images
+          - import
+          - --platform
+          - linux/amd64
+          - "{{ kubelab_import_directory }}/{{ item.archive }}"
+      loop: "{{ kubelab_images }}"
+      loop_control:
+        label: "{{ item.reference }}"
+      changed_when: true
+
+    - name: Verify images through the Kubernetes runtime interface
+      ansible.builtin.command:
+        argv:
+          - crictl
+          - --runtime-endpoint=unix:///run/containerd/containerd.sock
+          - --image-endpoint=unix:///run/containerd/containerd.sock
+          - inspecti
+          - "{{ item.reference }}"
+      loop: "{{ kubelab_images }}"
+      loop_control:
+        label: "{{ item.reference }}"
+      register: kubelab_runtime_image
+      until: >-
+        kubelab_runtime_image.rc == 0 and
+        (kubelab_runtime_image.stdout | from_json).status.id ==
+        kubelab_expected_image_ids[item.reference]
+      retries: 20
+      delay: 1
+      changed_when: false
+
+    - name: Confirm application image availability
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.reference }} is available through containerd CRI
+          on {{ inventory_hostname }}.
+      loop: "{{ kubelab_images }}"
+      loop_control:
+        label: "{{ item.reference }}"

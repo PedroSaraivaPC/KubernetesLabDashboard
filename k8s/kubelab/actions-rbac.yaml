@@ -1,0 +1,46 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubelab-dashboard-operator
+  namespace: kubelab
+  labels:
+    app.kubernetes.io/part-of: kubelab
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames:
+      - kubelab-backend
+      - kubelab-frontend
+    verbs: ["get"]
+
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames:
+      - kubelab-backend
+      - kubelab-frontend
+    verbs: ["get", "patch"]
+
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get"]
+
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubelab-dashboard-operator
+  namespace: kubelab
+  labels:
+    app.kubernetes.io/part-of: kubelab
+subjects:
+  - kind: ServiceAccount
+    name: kubelab-backend
+    namespace: kubelab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubelab-dashboard-operator

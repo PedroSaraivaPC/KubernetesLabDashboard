@@ -1,0 +1,137 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubelab-diagnostics
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.36
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netcheck-worker-01
+  namespace: kubelab-diagnostics
+  labels:
+    app: network-check
+    probe: worker-01
+spec:
+  automountServiceAccountToken: false
+  nodeSelector:
+    kubernetes.io/hostname: k8s-worker-01
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: tools
+      image: docker.io/library/busybox:1.37.0
+      command: ["/bin/sh", "-ec"]
+      args:
+        - |
+          hostname > /www/index.html
+          exec httpd -f -p 8080 -h /www
+      ports:
+        - name: http
+          containerPort: 8080
+      readinessProbe:
+        httpGet:
+          path: /
+          port: http
+        periodSeconds: 2
+        timeoutSeconds: 2
+      resources:
+        requests:
+          cpu: 10m
+          memory: 8Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: web-content
+          mountPath: /www
+  volumes:
+    - name: web-content
+      emptyDir: {}
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netcheck-worker-02
+  namespace: kubelab-diagnostics
+  labels:
+    app: network-check
+    probe: worker-02
+spec:
+  automountServiceAccountToken: false
+  nodeSelector:
+    kubernetes.io/hostname: k8s-worker-02
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: tools
+      image: docker.io/library/busybox:1.37.0
+      command: ["/bin/sh", "-ec"]
+      args:
+        - |
+          hostname > /www/index.html
+          exec httpd -f -p 8080 -h /www
+      ports:
+        - name: http
+          containerPort: 8080
+      readinessProbe:
+        httpGet:
+          path: /
+          port: http
+        periodSeconds: 2
+        timeoutSeconds: 2
+      resources:
+        requests:
+          cpu: 10m
+          memory: 8Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: web-content
+          mountPath: /www
+  volumes:
+    - name: web-content
+      emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netcheck-target
+  namespace: kubelab-diagnostics
+spec:
+  type: ClusterIP
+  selector:
+    app: network-check
+    probe: worker-02
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: http

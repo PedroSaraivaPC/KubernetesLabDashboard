@@ -1,0 +1,2 @@
+# Ansible automation engine.
+ansible-core==2.21.5

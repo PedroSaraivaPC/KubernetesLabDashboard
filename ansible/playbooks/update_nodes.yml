@@ -1,0 +1,29 @@
+---
+# Apply Ubuntu package updates and requested reboots.
+- name: Update Ubuntu lab nodes
+  hosts: k8s_cluster
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Refresh the APT package index
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 120
+
+    - name: Apply available package upgrades
+      ansible.builtin.apt:
+        upgrade: safe
+        force_apt_get: true
+        lock_timeout: 120
+
+    - name: Check whether Ubuntu requests a reboot
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+
+    - name: Reboot when requested by Ubuntu
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when: reboot_required.stat.exists
